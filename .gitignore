@@ -1,0 +1,13 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
