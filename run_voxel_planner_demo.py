@@ -11,6 +11,7 @@ except Exception:
     imageio = None
 import numpy as np
 
+from traj_gen.path_correction import bezier_correction_to_path
 from traj_gen.voxel_path_planner import AStar3D
 
 
@@ -37,6 +38,7 @@ def visualize(
     save_path: str = None,
     save_gif: str = None,
     num_views: int = 12,
+    corrected_path: np.ndarray = None,
 ) -> None:
     """Show occupancy voxels and path in 3D, save single view and optional rotating GIF."""
 
@@ -72,6 +74,26 @@ def visualize(
             )
         ax.scatter(path_world[0, 0], path_world[0, 1], path_world[0, 2], c="green", marker="o", s=60, label="Start")
         ax.scatter(path_world[-1, 0], path_world[-1, 1], path_world[-1, 2], c="magenta", marker="x", s=80, label="Goal")
+
+    if corrected_path is not None and len(corrected_path) > 0:
+        ax.plot(
+            corrected_path[:, 0],
+            corrected_path[:, 1],
+            corrected_path[:, 2],
+            "--",
+            c="#ff7f0e",
+            linewidth=1.2,
+            label="Correction path",
+        )
+        ax.scatter(
+            corrected_path[0, 0],
+            corrected_path[0, 1],
+            corrected_path[0, 2],
+            c="#ff7f0e",
+            marker="^",
+            s=60,
+            label="Current pos",
+        )
 
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
@@ -117,6 +139,24 @@ def main(argv=None) -> int:
     parser.add_argument("--heuristic-weight", type=float, default=1.0, help="Heuristic weight (>=1 for admissibility)")
     parser.add_argument("--save-gif", type=str, default="voxel_demo.gif", help="Path to save rotating GIF (set empty to skip)")
     parser.add_argument("--num-views", type=int, default=18, help="Number of views around the path for GIF")
+    parser.add_argument(
+        "--current-position",
+        type=float,
+        nargs=3,
+        help="Optional current drone position (x y z) to generate a smooth correction back to the path.",
+    )
+    parser.add_argument(
+        "--correction-pull",
+        type=float,
+        default=0.35,
+        help="Bezier pull strength toward the path (0-1 typical).",
+    )
+    parser.add_argument(
+        "--correction-steps",
+        type=int,
+        default=25,
+        help="Number of samples along the correction curve.",
+    )
     args = parser.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)
@@ -161,6 +201,24 @@ def main(argv=None) -> int:
     path_world = np.vstack(path)
     print(f"Found path with {len(path_world)} waypoints.")
 
+    corrected_path_world = None
+    if args.current_position is not None:
+        current = np.asarray(args.current_position, dtype=float)
+        try:
+            corrected_path_world, meta = bezier_correction_to_path(
+                current,
+                path_world,
+                pull_strength=args.correction_pull,
+                num_points=args.correction_steps,
+            )
+            print(
+                "Built correction path: distance to nominal {:.2f} m, rejoining at segment {} (t={:.2f}).".format(
+                    meta["distance"], int(meta["segment_index"]), meta["t_on_segment"]
+                )
+            )
+        except Exception as exc:
+            print(f"Could not build correction path: {exc}")
+
     save_gif = args.save_gif if args.save_gif else None
     visualize(
         occupancy,
@@ -171,6 +229,7 @@ def main(argv=None) -> int:
         save_path="voxel_demo.png",
         save_gif=save_gif,
         num_views=args.num_views,
+        corrected_path=corrected_path_world,
     )
     return 0
 
