@@ -169,6 +169,9 @@ def main(argv=None) -> int:
     while attempts < 20 and (start_world is None or goal_world is None or np.allclose(start_world, goal_world)):
         start_idx = pick_free_cell(free_mask, rng)
         goal_idx = pick_free_cell(free_mask, rng)
+        if abs(start_idx[2] - goal_idx[2]) < 1:
+            attempts += 1
+            continue
         start_world = origin + (np.array(start_idx) + 0.5) * voxel_size
         goal_world = origin + (np.array(goal_idx) + 0.5) * voxel_size
         attempts += 1
