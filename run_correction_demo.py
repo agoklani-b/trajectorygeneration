@@ -16,6 +16,52 @@ def generate_random_grid(shape: Tuple[int, int, int], obstacle_prob: float, rng:
     return (rng.random(shape) < obstacle_prob).astype(float)
 
 
+def pick_free_cell(free_mask: np.ndarray, rng: np.random.Generator) -> Tuple[int, int, int]:
+    """Pick a random free voxel index from a boolean free-mask."""
+    free = np.argwhere(free_mask)
+    if free.size == 0:
+        raise RuntimeError("No free cells to choose from.")
+    idx = rng.integers(0, free.shape[0])
+    return tuple(free[idx].tolist())
+
+
+def sample_start_and_goal(
+    free_mask: np.ndarray,
+    rng: np.random.Generator,
+    voxel_size: float,
+    origin: np.ndarray,
+    min_z_layers: int = 1,
+    min_dist: float = 1.0,
+    max_attempts: int = 100,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sample start/goal in free space with separation and vertical difference for better visuals."""
+    free = np.argwhere(free_mask)
+    if free.size == 0:
+        raise RuntimeError("No free cells to choose from.")
+    attempts = 0
+    while attempts < max_attempts:
+        s_idx = free[rng.integers(0, len(free))]
+        g_idx = free[rng.integers(0, len(free))]
+        if np.array_equal(s_idx, g_idx):
+            attempts += 1
+            continue
+        if abs(s_idx[2] - g_idx[2]) < min_z_layers:
+            attempts += 1
+            continue
+        s_world = origin + (s_idx + 0.5) * voxel_size
+        g_world = origin + (g_idx + 0.5) * voxel_size
+        if np.linalg.norm(s_world - g_world) < min_dist:
+            attempts += 1
+            continue
+        return s_world, g_world
+    # fallback
+    s_idx = free[rng.integers(0, len(free))]
+    g_idx = free[rng.integers(0, len(free))]
+    while np.array_equal(s_idx, g_idx):
+        g_idx = free[rng.integers(0, len(free))]
+    return origin + (s_idx + 0.5) * voxel_size, origin + (g_idx + 0.5) * voxel_size
+
+
 def sample_drift_positions(path: np.ndarray, num_drifts: int, sigma: float, rng: np.random.Generator) -> List[np.ndarray]:
     """Pick positions near the path by adding randomized 3D offsets to random waypoints (excluding endpoints)."""
     if len(path) < 3:
@@ -126,10 +172,21 @@ def main(argv=None) -> int:
         origin=tuple(origin.tolist()),
     )
 
-    start_idx = (0, 0, 0)
-    goal_idx = (args.shape[0] - 1, args.shape[1] - 1, max(0, args.shape[2] // 2 - 1))
-    start_world = origin + (np.array(start_idx) + 0.5) * args.voxel_size
-    goal_world = origin + (np.array(goal_idx) + 0.5) * args.voxel_size
+    inflated = planner._inflate(occupancy)
+    free_mask = ~inflated
+
+    try:
+        start_world, goal_world = sample_start_and_goal(
+            free_mask,
+            rng,
+            args.voxel_size,
+            origin,
+            min_z_layers=2,
+            min_dist=2.0,
+        )
+    except RuntimeError:
+        print("No path found; free space too limited.")
+        return 1
 
     path = planner.plan(occupancy, start_world, goal_world)
     if path is None:
@@ -138,7 +195,6 @@ def main(argv=None) -> int:
     path_world = np.vstack(path)
     print(f"Found nominal path with {len(path_world)} waypoints.")
 
-    inflated = planner._inflate(occupancy)
     smoothed_path_world = smooth_path_catmull_rom(
         path_world,
         inflated,
