@@ -133,30 +133,46 @@ def animate_corrections(
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
 
+    s_cursor = 0.0
+    pos = path_world[0].copy()
+    dist_threshold = 1.5 * args.disturbance_sigma
+
     for k in range(args.anim_frames):
         frac = k / max(args.anim_frames - 1, 1)
-        nominal = interp_at_s(frac * total_len)
-        disturbed = nominal + rng.normal(scale=args.disturbance_sigma, size=3)
+        target_s = frac * total_len
+        target = interp_at_s(target_s)
 
-        corrected, meta = bezier_correction_to_path(
-            current_position=disturbed,
-            planned_path=path_world,
-            pull_strength=args.correction_pull,
-            num_points=args.correction_steps,
-            min_forward_progress=args.correction_min_progress,
-            forward_push=args.correction_forward_push,
-            lookahead_distance=args.correction_lookahead,
-            occupancy_inflated=inflated,
-            voxel_size=voxel_size,
-            origin=origin,
-        )
+        # apply smooth disturbance around target
+        disturbance = rng.normal(scale=args.disturbance_sigma, size=3)
+        pos = pos + 0.35 * (target - pos) + disturbance
+
+        corrected = None
+        dist_to_path = np.linalg.norm(pos - target)
+        if dist_to_path > dist_threshold:
+            corrected, meta = bezier_correction_to_path(
+                current_position=pos,
+                planned_path=path_world,
+                pull_strength=args.correction_pull,
+                num_points=args.correction_steps,
+                min_forward_progress=args.correction_min_progress,
+                forward_push=args.correction_forward_push,
+                lookahead_distance=args.correction_lookahead,
+                occupancy_inflated=inflated,
+                voxel_size=voxel_size,
+                origin=origin,
+            )
+            if corrected is not None and len(corrected) > 1:
+                step_vec = corrected[1] - corrected[0]
+                pos = corrected[0] + 0.5 * step_vec  # take a half step toward correction
+            else:
+                corrected = None
 
         ax.clear()
         ax.plot(path_world[:, 0], path_world[:, 1], path_world[:, 2], "-", c="#1f77b4", linewidth=1.5, label="Nominal path")
         ax.scatter(path_world[0, 0], path_world[0, 1], path_world[0, 2], c="green", marker="o", s=60, label="Start")
         ax.scatter(path_world[-1, 0], path_world[-1, 1], path_world[-1, 2], c="magenta", marker="x", s=80, label="Goal")
-        ax.scatter(nominal[0], nominal[1], nominal[2], c="#888888", marker="o", s=40, label="Nominal pose")
-        ax.scatter(disturbed[0], disturbed[1], disturbed[2], c="#ff7f0e", marker="^", s=60, label="Disturbed pose")
+        ax.scatter(target[0], target[1], target[2], c="#888888", marker="o", s=40, label="Nominal pose")
+        ax.scatter(pos[0], pos[1], pos[2], c="#ff7f0e", marker="^", s=60, label="Disturbed pose")
         if corrected is not None:
             ax.plot(
                 corrected[:, 0],
