@@ -29,43 +29,6 @@ def pick_free_cell(free_mask: np.ndarray, rng: np.random.Generator) -> Tuple[int
     return tuple(free[idx].tolist())
 
 
-def sample_start_and_goal(
-    free_mask: np.ndarray,
-    rng: np.random.Generator,
-    voxel_size: float,
-    origin: np.ndarray,
-    min_z_layers: int = 1,
-    min_dist: float = 1.0,
-    max_attempts: int = 100,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Sample start/goal in free space with some separation and vertical difference for nicer visuals."""
-    free = np.argwhere(free_mask)
-    if free.size == 0:
-        raise RuntimeError("No free cells to choose from.")
-    attempts = 0
-    while attempts < max_attempts:
-        s_idx = free[rng.integers(0, len(free))]
-        g_idx = free[rng.integers(0, len(free))]
-        if np.array_equal(s_idx, g_idx):
-            attempts += 1
-            continue
-        if abs(s_idx[2] - g_idx[2]) < min_z_layers:
-            attempts += 1
-            continue
-        s_world = origin + (s_idx + 0.5) * voxel_size
-        g_world = origin + (g_idx + 0.5) * voxel_size
-        if np.linalg.norm(s_world - g_world) < min_dist:
-            attempts += 1
-            continue
-        return s_world, g_world
-    # fallback: just pick two different free cells
-    s_idx = free[rng.integers(0, len(free))]
-    g_idx = free[rng.integers(0, len(free))]
-    while np.array_equal(s_idx, g_idx):
-        g_idx = free[rng.integers(0, len(free))]
-    return origin + (s_idx + 0.5) * voxel_size, origin + (g_idx + 0.5) * voxel_size
-
-
 def visualize(
     occupancy: np.ndarray,
     path_world: np.ndarray,
@@ -199,16 +162,18 @@ def main(argv=None) -> int:
     inflated = planner._inflate(occupancy)
     free_mask = ~inflated
 
-    try:
-        start_world, goal_world = sample_start_and_goal(
-            free_mask,
-            rng,
-            voxel_size,
-            origin,
-            min_z_layers=2,
-            min_dist=2.0,
-        )
-    except RuntimeError:
+    # Try a few draws for start/goal in free inflated space
+    attempts = 0
+    start_world = None
+    goal_world = None
+    while attempts < 20 and (start_world is None or goal_world is None or np.allclose(start_world, goal_world)):
+        start_idx = pick_free_cell(free_mask, rng)
+        goal_idx = pick_free_cell(free_mask, rng)
+        start_world = origin + (np.array(start_idx) + 0.5) * voxel_size
+        goal_world = origin + (np.array(goal_idx) + 0.5) * voxel_size
+        attempts += 1
+
+    if start_world is None or goal_world is None:
         print("Could not sample free start/goal; grid too full.")
         return 1
 

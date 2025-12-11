@@ -7,6 +7,10 @@ import matplotlib
 matplotlib.use("Agg")  # ensure headless rendering
 import matplotlib.pyplot as plt
 import numpy as np
+try:
+    import imageio.v2 as imageio
+except Exception:
+    imageio = None
 
 from traj_gen import AStar3D, bezier_correction_to_path, smooth_path_catmull_rom
 
@@ -14,52 +18,6 @@ from traj_gen import AStar3D, bezier_correction_to_path, smooth_path_catmull_rom
 def generate_random_grid(shape: Tuple[int, int, int], obstacle_prob: float, rng: np.random.Generator) -> np.ndarray:
     """Generate a random occupancy grid with the given fill probability."""
     return (rng.random(shape) < obstacle_prob).astype(float)
-
-
-def pick_free_cell(free_mask: np.ndarray, rng: np.random.Generator) -> Tuple[int, int, int]:
-    """Pick a random free voxel index from a boolean free-mask."""
-    free = np.argwhere(free_mask)
-    if free.size == 0:
-        raise RuntimeError("No free cells to choose from.")
-    idx = rng.integers(0, free.shape[0])
-    return tuple(free[idx].tolist())
-
-
-def sample_start_and_goal(
-    free_mask: np.ndarray,
-    rng: np.random.Generator,
-    voxel_size: float,
-    origin: np.ndarray,
-    min_z_layers: int = 1,
-    min_dist: float = 1.0,
-    max_attempts: int = 100,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Sample start/goal in free space with separation and vertical difference for better visuals."""
-    free = np.argwhere(free_mask)
-    if free.size == 0:
-        raise RuntimeError("No free cells to choose from.")
-    attempts = 0
-    while attempts < max_attempts:
-        s_idx = free[rng.integers(0, len(free))]
-        g_idx = free[rng.integers(0, len(free))]
-        if np.array_equal(s_idx, g_idx):
-            attempts += 1
-            continue
-        if abs(s_idx[2] - g_idx[2]) < min_z_layers:
-            attempts += 1
-            continue
-        s_world = origin + (s_idx + 0.5) * voxel_size
-        g_world = origin + (g_idx + 0.5) * voxel_size
-        if np.linalg.norm(s_world - g_world) < min_dist:
-            attempts += 1
-            continue
-        return s_world, g_world
-    # fallback
-    s_idx = free[rng.integers(0, len(free))]
-    g_idx = free[rng.integers(0, len(free))]
-    while np.array_equal(s_idx, g_idx):
-        g_idx = free[rng.integers(0, len(free))]
-    return origin + (s_idx + 0.5) * voxel_size, origin + (g_idx + 0.5) * voxel_size
 
 
 def sample_drift_positions(path: np.ndarray, num_drifts: int, sigma: float, rng: np.random.Generator) -> List[np.ndarray]:
@@ -139,6 +97,99 @@ def visualize(path_world: np.ndarray, drifts: List[np.ndarray], corrections: Lis
     print(f"Saved visualization to {save_path}")
 
 
+def animate_corrections(
+    path_world: np.ndarray,
+    inflated: np.ndarray,
+    voxel_size: float,
+    origin: np.ndarray,
+    rng: np.random.Generator,
+    args,
+) -> None:
+    """Generate a GIF of a point following the nominal path with disturbances and online corrections."""
+    if imageio is None:
+        print("imageio not available; skipping animation.")
+        return
+
+    # Arc-length parameterization for constant-speed sampling
+    seg = np.diff(path_world, axis=0)
+    seg_lengths = np.linalg.norm(seg, axis=1)
+    cum_lengths = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total_len = cum_lengths[-1]
+    if total_len < 1e-6:
+        print("Path too short for animation.")
+        return
+
+    def interp_at_s(s: float) -> np.ndarray:
+        s = float(np.clip(s, 0.0, total_len))
+        idx = np.searchsorted(cum_lengths, s, side="right") - 1
+        idx = max(0, min(idx, len(seg_lengths) - 1))
+        s0 = cum_lengths[idx]
+        seg_len = seg_lengths[idx]
+        t = 0.0 if seg_len < 1e-9 else (s - s0) / seg_len
+        return path_world[idx] + t * seg[idx]
+
+    pts_bounds = np.vstack([path_world, path_world + args.disturbance_sigma, path_world - args.disturbance_sigma])
+    frames = []
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection="3d")
+
+    for k in range(args.anim_frames):
+        frac = k / max(args.anim_frames - 1, 1)
+        nominal = interp_at_s(frac * total_len)
+        disturbed = nominal + rng.normal(scale=args.disturbance_sigma, size=3)
+
+        corrected, meta = bezier_correction_to_path(
+            current_position=disturbed,
+            planned_path=path_world,
+            pull_strength=args.correction_pull,
+            num_points=args.correction_steps,
+            min_forward_progress=args.correction_min_progress,
+            forward_push=args.correction_forward_push,
+            lookahead_distance=args.correction_lookahead,
+            occupancy_inflated=inflated,
+            voxel_size=voxel_size,
+            origin=origin,
+        )
+
+        ax.clear()
+        ax.plot(path_world[:, 0], path_world[:, 1], path_world[:, 2], "-", c="#1f77b4", linewidth=1.5, label="Nominal path")
+        ax.scatter(path_world[0, 0], path_world[0, 1], path_world[0, 2], c="green", marker="o", s=60, label="Start")
+        ax.scatter(path_world[-1, 0], path_world[-1, 1], path_world[-1, 2], c="magenta", marker="x", s=80, label="Goal")
+        ax.scatter(nominal[0], nominal[1], nominal[2], c="#888888", marker="o", s=40, label="Nominal pose")
+        ax.scatter(disturbed[0], disturbed[1], disturbed[2], c="#ff7f0e", marker="^", s=60, label="Disturbed pose")
+        if corrected is not None:
+            ax.plot(
+                corrected[:, 0],
+                corrected[:, 1],
+                corrected[:, 2],
+                "--",
+                c="#ff7f0e",
+                linewidth=1.2,
+                alpha=0.9,
+                label="Correction",
+            )
+
+        ax.set_xlabel("X [m]")
+        ax.set_ylabel("Y [m]")
+        ax.set_zlabel("Z [m]")
+        ax.set_title("Correction animation")
+        set_axes_equal(ax, pts_bounds)
+        handles, labels = ax.get_legend_handles_labels()
+        dedup = {}
+        for h, l in zip(handles, labels):
+            if l and l not in dedup:
+                dedup[l] = h
+        if dedup:
+            ax.legend(dedup.values(), dedup.keys(), loc="upper left")
+        fig.canvas.draw()
+        buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        frames.append(buf)
+
+    imageio.mimsave(args.animate_gif, frames, fps=10)
+    print(f"Saved correction animation to {args.animate_gif}")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Visualize online path correction from drifted poses.")
     parser.add_argument("--shape", type=int, nargs=3, default=[30, 30, 10], help="Grid shape (x y z)")
@@ -156,6 +207,10 @@ def main(argv=None) -> int:
     parser.add_argument("--correction-forward-push", type=float, default=0.3, help="Forward bias along tangent for Bezier controls")
     parser.add_argument("--save-path", type=str, default="correction_demo.png", help="Where to save the visualization")
     parser.add_argument("--smooth-samples", type=int, default=8, help="Samples per segment for path smoothing")
+    parser.add_argument("--animate", action="store_true", help="Generate an animation of disturbed motion and corrections")
+    parser.add_argument("--anim-frames", type=int, default=40, help="Number of frames in the correction animation")
+    parser.add_argument("--disturbance-sigma", type=float, default=0.35, help="Per-step disturbance scale for animation [m]")
+    parser.add_argument("--animate-gif", type=str, default="correction_animation.gif", help="Path to save the correction animation GIF")
     args = parser.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)
@@ -172,21 +227,10 @@ def main(argv=None) -> int:
         origin=tuple(origin.tolist()),
     )
 
-    inflated = planner._inflate(occupancy)
-    free_mask = ~inflated
-
-    try:
-        start_world, goal_world = sample_start_and_goal(
-            free_mask,
-            rng,
-            args.voxel_size,
-            origin,
-            min_z_layers=2,
-            min_dist=2.0,
-        )
-    except RuntimeError:
-        print("No path found; free space too limited.")
-        return 1
+    start_idx = (0, 0, 0)
+    goal_idx = (args.shape[0] - 1, args.shape[1] - 1, max(0, args.shape[2] // 2 - 1))
+    start_world = origin + (np.array(start_idx) + 0.5) * args.voxel_size
+    goal_world = origin + (np.array(goal_idx) + 0.5) * args.voxel_size
 
     path = planner.plan(occupancy, start_world, goal_world)
     if path is None:
@@ -195,6 +239,7 @@ def main(argv=None) -> int:
     path_world = np.vstack(path)
     print(f"Found nominal path with {len(path_world)} waypoints.")
 
+    inflated = planner._inflate(occupancy)
     smoothed_path_world = smooth_path_catmull_rom(
         path_world,
         inflated,
@@ -237,11 +282,13 @@ def main(argv=None) -> int:
             f"rejoin segment {meta['segment_index']} at t={meta['t_on_segment']:.2f}"
         )
 
-    if len(corrections) == 0:
+    if len(corrections) > 0:
+        visualize(smoothed_path_world, valid_drifts, corrections, args.save_path)
+    else:
         print("No collision-free corrections found; nothing to visualize.")
-        return 1
 
-    visualize(smoothed_path_world, valid_drifts, corrections, args.save_path)
+    if args.animate:
+        animate_corrections(smoothed_path_world, inflated, args.voxel_size, origin, rng, args)
     return 0
 
 
