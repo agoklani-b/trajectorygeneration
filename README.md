@@ -19,7 +19,7 @@ pip install -e .
 ```
 
 ## Demo commands
-- Plan + smooth + export visuals:
+- Plan + smooth + export visuals (nominal only):
 ```bash
 python run_voxel_planner_demo.py --shape 30 30 10 --obstacle-prob 0.2 --robot-radius 0.25 --smooth --save-gif voxel_demo.gif
 ```
@@ -36,7 +36,7 @@ Key flags: `--connectivity {6,18,26}` neighbor set; `--max-iters` expansion cap;
 
 ## How smoothing and correction work
 - Smoothing samples a Catmull–Rom spline per segment; if any sample hits the inflated occupancy grid, the smoothed path is discarded and the original polyline is used.
-- Live correction finds the closest point on the (smoothed) path to the current pose, then generates a cubic Bezier curve that rejoins smoothly before continuing along the nominal path.
+- Live correction (in `run_correction_demo.py`) finds a forward point on the (smoothed) path, then generates a cubic Bezier curve that rejoins smoothly—leaving the nominal voxel demo to show the baseline path only.
 
 ## API snippet
 ```python
