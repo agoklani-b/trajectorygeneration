@@ -1,59 +1,74 @@
 # Trajectory Generation
 
-Lightweight 3D voxel-based planning utilities plus a live correction helper to keep a vehicle on its nominal path even when it drifts due to disturbances.
+Lightweight 3D voxel planning utilities with smoothing and online correction to keep a vehicle on its intended path, even under drift.
 
-## Contents
-- `traj_gen/voxel_path_planner.py`: 3D A* over occupancy grids with inflation for robot radius and configurable connectivity (6/18/26).
-- `traj_gen/path_correction.py`: Projects a live pose onto the planned path and builds a short cubic Bezier that bends back to the closest point without fully recomputing the route.
-- `run_voxel_planner_demo.py`: End-to-end demo that samples a random map, plans a path, optionally generates a correction curve from a given current position, and saves a static view plus an optional rotating GIF.
-- Artifacts: `voxel_demo.png`, `voxel_demo.gif` show a typical random run.
+## Features
+- **Voxel A\***: `traj_gen/voxel_path_planner.py` plans in 3D occupancy grids with robot-radius inflation and 6/18/26-connectivity.
+- **Path smoothing**: `traj_gen/path_smoothing.py` converts the waypoint polyline to a Catmull–Rom spline while collision-checking against the inflated map.
+- **Online correction**: `traj_gen/path_correction.py` projects a live pose to a forward point on the path (avoids backtracking), collision-checks the curve, and builds a forward-biased Bezier bridge back.
+- **Demos**:
+  - `run_voxel_planner_demo.py`: plan, optional smoothing, optional live correction, and static/GIF visualization.
+  - `run_correction_demo.py`: generate multiple drifted poses, correct each, and visualize the curves.
+- **Artifacts**: `voxel_demo.png`, `voxel_demo.gif`, `correction_demo.png` show typical runs.
 
-## Quickstart
-1) Python 3.8+ environment.
+## Setup
+1) Python 3.8+ environment  
 2) Install:
 ```bash
 pip install -e .
 ```
-3) Plan a path on a random map:
+
+## Demo commands
+- Plan + smooth + export visuals:
 ```bash
-python run_voxel_planner_demo.py --shape 30 30 10 --obstacle-prob 0.2 --robot-radius 0.25 --save-gif voxel_demo.gif
+python run_voxel_planner_demo.py --shape 30 30 10 --obstacle-prob 0.2 --robot-radius 0.25 --smooth --save-gif voxel_demo.gif
 ```
-4) Simulate online correction from a drifting pose:
+- Add a live correction from a drifting pose:
 ```bash
-python run_voxel_planner_demo.py --current-position 1.0 2.0 0.5 --correction-pull 0.35 --correction-steps 25
+python run_voxel_planner_demo.py --current-position 1.0 2.0 0.5 --correction-pull 0.35 --correction-steps 25 --smooth
+```
+- Visualize multiple drift corrections at once:
+```bash
+python run_correction_demo.py --num-drifts 3 --drift-sigma 0.6 --correction-pull 0.35 --smooth-samples 10
 ```
 
-Key flags: `--connectivity {6,18,26}` selects neighbor set; `--max-iters` caps expansions; `--heuristic-weight` scales the heuristic (>=1.0 keeps it admissible).
+Key flags: `--connectivity {6,18,26}` neighbor set; `--max-iters` expansion cap; `--heuristic-weight` heuristic scale (>=1 for admissibility); `--smooth-samples` Catmull–Rom density.
 
-## How the correction works
-- We continuously project the live drone position onto the nominal path (closest point on the polyline).
-- A cubic Bezier bridge pulls from the live pose toward that point, with tunable aggressiveness (`pull_strength`) and sampling density (`num_points`).
-- The output path is simply: correction curve + remainder of the nominal path, so the vehicle smoothly rejoins and continues.
+## How smoothing and correction work
+- Smoothing samples a Catmull–Rom spline per segment; if any sample hits the inflated occupancy grid, the smoothed path is discarded and the original polyline is used.
+- Live correction finds the closest point on the (smoothed) path to the current pose, then generates a cubic Bezier curve that rejoins smoothly before continuing along the nominal path.
 
-### API snippets
+## API snippet
 ```python
 import numpy as np
-from traj_gen import AStar3D, bezier_correction_to_path
+from traj_gen import AStar3D, smooth_path_catmull_rom, bezier_correction_to_path
 
-# plan
 planner = AStar3D(voxel_size=0.2, robot_radius=0.25, connectivity=26)
 path = planner.plan(occupancy_grid, start_xyz, goal_xyz)
 path_world = np.vstack(path)
+inflated = planner._inflate(occupancy_grid)
+smooth_path = smooth_path_catmull_rom(path_world, inflated, voxel_size=0.2, origin=np.zeros(3)) or path_world
 
-# live correction
 current_xyz = np.array([1.0, 2.0, 0.5])
 corrected_path, meta = bezier_correction_to_path(
-    current_position=current_xyz,
-    planned_path=path_world,
+    current_xyz,
+    smooth_path,
     pull_strength=0.35,
     num_points=25,
+    min_forward_progress=0.1,    # meters of along-path progress before rejoining
+    lookahead_distance=0.6,      # push rejoin target forward along the path
+    forward_push=0.3,            # bias control points along path tangent
+    occupancy_inflated=inflated, # collision check the correction curve
+    voxel_size=0.2,
+    origin=np.zeros(3),
 )
+# meta includes the segment index/t chosen, biased toward forward progress
 ```
 
 ## Notes
 - Occupancy grid convention: `occupancy[x, y, z]`; world position = `origin + (idx + 0.5) * voxel_size`.
-- `setup.py` contains packaging metadata and dependencies (numpy, scipy, matplotlib, imageio).
-- Swap the random map generator with real occupancy data to test against actual environments.
+- Dependencies are listed in `setup.py` (numpy, scipy, matplotlib, imageio).
+- Swap the random map generator for real occupancy data to test on actual environments.
 
 ## License
 MIT

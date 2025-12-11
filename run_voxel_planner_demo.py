@@ -12,6 +12,7 @@ except Exception:
 import numpy as np
 
 from traj_gen.path_correction import bezier_correction_to_path
+from traj_gen.path_smoothing import smooth_path_catmull_rom
 from traj_gen.voxel_path_planner import AStar3D
 
 
@@ -39,6 +40,7 @@ def visualize(
     save_gif: str = None,
     num_views: int = 12,
     corrected_path: np.ndarray = None,
+    smoothed_path: np.ndarray = None,
 ) -> None:
     """Show occupancy voxels and path in 3D, save single view and optional rotating GIF."""
 
@@ -74,6 +76,17 @@ def visualize(
             )
         ax.scatter(path_world[0, 0], path_world[0, 1], path_world[0, 2], c="green", marker="o", s=60, label="Start")
         ax.scatter(path_world[-1, 0], path_world[-1, 1], path_world[-1, 2], c="magenta", marker="x", s=80, label="Goal")
+
+    if smoothed_path is not None and len(smoothed_path) > 0:
+        ax.plot(
+            smoothed_path[:, 0],
+            smoothed_path[:, 1],
+            smoothed_path[:, 2],
+            "-.",
+            c="#2ca02c",
+            linewidth=1.3,
+            label="Smoothed path",
+        )
 
     if corrected_path is not None and len(corrected_path) > 0:
         ax.plot(
@@ -157,6 +170,35 @@ def main(argv=None) -> int:
         default=25,
         help="Number of samples along the correction curve.",
     )
+    parser.add_argument(
+        "--correction-lookahead",
+        type=float,
+        default=0.6,
+        help="Along-path distance (m) beyond the nearest point to target for rejoin.",
+    )
+    parser.add_argument(
+        "--correction-min-progress",
+        type=float,
+        default=0.1,
+        help="Minimum forward progress (m) beyond the nearest point before rejoining.",
+    )
+    parser.add_argument(
+        "--correction-forward-push",
+        type=float,
+        default=0.3,
+        help="Forward bias along path tangent for Bezier control points.",
+    )
+    parser.add_argument(
+        "--smooth",
+        action="store_true",
+        help="Smooth the nominal path with a Catmull-Rom spline (collision-checked).",
+    )
+    parser.add_argument(
+        "--smooth-samples",
+        type=int,
+        default=8,
+        help="Samples per segment when smoothing (higher = denser).",
+    )
     args = parser.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)
@@ -201,21 +243,47 @@ def main(argv=None) -> int:
     path_world = np.vstack(path)
     print(f"Found path with {len(path_world)} waypoints.")
 
+    smoothed_path_world = None
+    if args.smooth:
+        smoothed_path_world = smooth_path_catmull_rom(
+            path_world,
+            inflated,
+            voxel_size=voxel_size,
+            origin=origin,
+            samples_per_segment=args.smooth_samples,
+        )
+        if smoothed_path_world is None:
+            print("Smoothing failed (collision or bounds); using original path.")
+        else:
+            print(f"Smoothed path has {len(smoothed_path_world)} points.")
+
     corrected_path_world = None
     if args.current_position is not None:
         current = np.asarray(args.current_position, dtype=float)
         try:
             corrected_path_world, meta = bezier_correction_to_path(
                 current,
-                path_world,
+                smoothed_path_world if smoothed_path_world is not None else path_world,
                 pull_strength=args.correction_pull,
                 num_points=args.correction_steps,
+                min_forward_progress=args.correction_min_progress,
+                forward_push=args.correction_forward_push,
+                lookahead_distance=args.correction_lookahead,
+                occupancy_inflated=inflated,
+                voxel_size=voxel_size,
+                origin=origin,
             )
-            print(
-                "Built correction path: distance to nominal {:.2f} m, rejoining at segment {} (t={:.2f}).".format(
-                    meta["distance"], int(meta["segment_index"]), meta["t_on_segment"]
+            if corrected_path_world is None:
+                print(
+                    "Correction rejected due to collision; keeping nominal path. "
+                    f"Rejoin attempt at segment {int(meta['segment_index'])}, t={meta['t_on_segment']:.2f}"
                 )
-            )
+            else:
+                print(
+                    "Built correction path: distance to nominal {:.2f} m, rejoining at segment {} (t={:.2f}).".format(
+                        meta["distance"], int(meta["segment_index"]), meta["t_on_segment"]
+                    )
+                )
         except Exception as exc:
             print(f"Could not build correction path: {exc}")
 
@@ -230,6 +298,7 @@ def main(argv=None) -> int:
         save_gif=save_gif,
         num_views=args.num_views,
         corrected_path=corrected_path_world,
+        smoothed_path=smoothed_path_world,
     )
     return 0
 
